@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Runtime data
+app/config/state.json
+cdn/
+logs/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Env
+.env
+.env.*
+
+# PM2
+.pids/
+*.pid

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pulzz Hot Update Admin</title>
+    <style>
+      :root {
+        --bg: #f4f6f8;
+        --card: #ffffff;
+        --text: #1b2430;
+        --muted: #556070;
+        --accent: #0d6efd;
+        --danger: #d43f3a;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        color: var(--text);
+        background: linear-gradient(180deg, #eef3f9 0%, #f9fbfd 50%, #ffffff 100%);
+      }
+      .container {
+        max-width: 980px;
+        margin: 24px auto;
+        padding: 0 16px;
+      }
+      .card {
+        background: var(--card);
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(16, 40, 72, 0.08);
+        padding: 20px;
+        margin-bottom: 16px;
+      }
+      h1, h2 {
+        margin-top: 0;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      button {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+      button.secondary {
+        background: #334155;
+      }
+      button.danger {
+        background: var(--danger);
+      }
+      #status {
+        color: var(--muted);
+        min-height: 24px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th, td {
+        border-bottom: 1px solid #e8edf2;
+        text-align: left;
+        padding: 10px 8px;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 700;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+      @media (max-width: 640px) {
+        .actions {
+          flex-direction: column;
+        }
+        button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="card">
+        <h1>Pulzz WxMini Hot Update</h1>
+        <p>Platform: <strong>wxmini</strong></p>
+      </div>
+
+      <div class="card">
+        <h2>Upload Version ZIP</h2>
+        <form id="uploadForm" class="row">
+          <input type="file" id="zipFile" name="file" accept=".zip" required />
+          <button type="submit">Upload</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content: space-between">
+          <h2>Versions</h2>
+          <button class="secondary" id="refreshBtn">Refresh</button>
+        </div>
+        <p id="currentVersion">Current Version: -</p>
+        <div id="status"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Version</th>
+              <th>Uploaded At</th>
+              <th>Published At</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="versionsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      const PLATFORM = 'wxmini';
+      const versionsBody = document.getElementById('versionsBody');
+      const statusEl = document.getElementById('status');
+      const currentVersionEl = document.getElementById('currentVersion');
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      async function postJson(url, payload) {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        return res.json();
+      }
+
+      async function refreshVersions() {
+        const res = await fetch(`/admin/versions?platform=${PLATFORM}`);
+        const body = await res.json();
+        const data = JSON.parse(body.Data || '{}');
+
+        currentVersionEl.textContent = `Current Version: ${data.currentVersion || '-'}`;
+        versionsBody.innerHTML = '';
+
+        (data.versions || []).forEach((item) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${item.version}</td>
+            <td>${item.uploadedAt || '-'}</td>
+            <td>${item.publishedAt || '-'}</td>
+            <td class="actions">
+              <button data-version="${item.version}" data-action="publish">Publish</button>
+              <button class="danger" data-version="${item.version}" data-action="switch">Switch</button>
+            </td>
+          `;
+          versionsBody.appendChild(tr);
+        });
+      }
+
+      document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const file = document.getElementById('zipFile').files[0];
+        if (!file) {
+          return;
+        }
+
+        const form = new FormData();
+        form.append('platform', PLATFORM);
+        form.append('file', file, file.name);
+
+        setStatus('Uploading...');
+        const res = await fetch('/admin/upload', { method: 'POST', body: form });
+        const body = await res.json();
+        setStatus(`${body.Code}: ${body.Message}`);
+        await refreshVersions();
+      });
+
+      document.getElementById('refreshBtn').addEventListener('click', refreshVersions);
+
+      versionsBody.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) {
+          return;
+        }
+        const version = btn.getAttribute('data-version');
+        const action = btn.getAttribute('data-action');
+        setStatus(`${action} ${version}...`);
+        const body = await postJson(`/admin/${action}`, { platform: PLATFORM, version });
+        setStatus(`${body.Code}: ${body.Message}`);
+        await refreshVersions();
+      });
+
+      refreshVersions().catch((err) => setStatus(err.message));
+    </script>
+  </body>
+</html>
