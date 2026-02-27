@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { getAssetsPrefixRoot, getLegacyHotupdatePrefixRoot } = require('./paths');
+const { getLegacyHotupdatePrefixRoot } = require('./paths');
 
 const COS_IO_TIMEOUT_MS = Number(process.env.COS_IO_TIMEOUT_MS || 120000);
 const COS_RETRY_COUNT = Number(process.env.COS_RETRY_COUNT || 3);
@@ -72,13 +72,10 @@ async function syncToCosMock({ platform, version, sourceDir }) {
   if (!mockRoot) {
     return;
   }
-  const primaryRoot = path.join(mockRoot, getAssetsPrefixRoot(), platform, String(version));
   const legacyRoot = path.join(mockRoot, getLegacyHotupdatePrefixRoot(), String(version));
-  for (const targetRoot of [primaryRoot, legacyRoot]) {
-    await fs.rm(targetRoot, { recursive: true, force: true });
-    await fs.mkdir(path.dirname(targetRoot), { recursive: true });
-    await fs.cp(sourceDir, targetRoot, { recursive: true, force: true });
-  }
+  await fs.rm(legacyRoot, { recursive: true, force: true });
+  await fs.mkdir(path.dirname(legacyRoot), { recursive: true });
+  await fs.cp(sourceDir, legacyRoot, { recursive: true, force: true });
 }
 
 async function listVersionsByFsRoot(rootDir) {
@@ -111,7 +108,6 @@ function createCosClient() {
 
 async function listVersionsFromCos(platform) {
   const { cos, bucket, region } = createCosClient();
-  const primaryPrefix = `${getAssetsPrefixRoot()}/${platform}/`;
   const legacyPrefix = `${getLegacyHotupdatePrefixRoot()}/`;
   const discovered = new Set();
 
@@ -149,7 +145,6 @@ async function listVersionsFromCos(platform) {
     }
   }
 
-  await scan(primaryPrefix);
   await scan(legacyPrefix);
   return [...discovered].sort((a, b) => Number(b) - Number(a));
 }
@@ -159,26 +154,21 @@ async function listAvailableVersions(platform) {
   if (driver === 'cos') {
     if (process.env.PULZZ_COS_MOCK_ROOT) {
       const mockRoot = process.env.PULZZ_COS_MOCK_ROOT;
-      const primary = await listVersionsByFsRoot(path.join(mockRoot, getAssetsPrefixRoot(), platform));
       const legacy = await listVersionsByFsRoot(path.join(mockRoot, getLegacyHotupdatePrefixRoot()));
-      return [...new Set([...primary, ...legacy])].sort((a, b) => Number(b) - Number(a));
+      return legacy;
     }
     return listVersionsFromCos(platform);
   }
   const localRoot = process.env.PULZZ_CDN_ROOT
-    ? path.join(process.env.PULZZ_CDN_ROOT, getAssetsPrefixRoot(), platform)
-    : path.join('/opt/pulzz-hotupdate', 'cdn', getAssetsPrefixRoot(), platform);
+    ? path.join(process.env.PULZZ_CDN_ROOT, getLegacyHotupdatePrefixRoot())
+    : path.join('/opt/pulzz-hotupdate', 'cdn', getLegacyHotupdatePrefixRoot());
   return listVersionsByFsRoot(localRoot);
 }
 
 async function syncToCosReal({ platform, version, sourceDir }) {
   const { cos, bucket, region } = createCosClient();
-  const prefixRoot = getAssetsPrefixRoot();
   const legacyPrefixRoot = getLegacyHotupdatePrefixRoot();
-  const versionPrefixes = [
-    `${prefixRoot}/${platform}/${version}/`,
-    `${legacyPrefixRoot}/${version}/`
-  ];
+  const versionPrefixes = [`${legacyPrefixRoot}/${version}/`];
 
   async function listAllKeysByPrefix(prefix) {
     const all = [];

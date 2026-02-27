@@ -151,7 +151,10 @@ test('upload invalid filename returns 4001', async () => {
 test('register version succeeds when version exists in storage', async () => {
   const ctx = await setupApp();
   try {
-    const existingVersionDir = path.join(ctx.tempRoot, 'cdn', 'pulzz-gameres', 'wxmini', '112');
+    const existingVersionDir = path.join(
+      ctx.tempRoot,
+      'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/112'
+    );
     await fs.mkdir(existingVersionDir, { recursive: true });
     await fs.writeFile(path.join(existingVersionDir, 'manifest.json'), '{}');
 
@@ -217,7 +220,7 @@ test('admin routes require basic auth', async () => {
   }
 });
 
-test('upload then publish only updates current version without local sync copy', async () => {
+test('upload then publish updates current version using legacy-only storage layout', async () => {
   const ctx = await setupApp();
   try {
     const zip = new AdmZip();
@@ -250,16 +253,11 @@ test('upload then publish only updates current version without local sync copy',
     const state = JSON.parse(await fs.readFile(path.join(ctx.tempRoot, 'app', 'config', 'state.json'), 'utf8'));
     assert.equal(state.currentVersion, '100');
 
-    await assert.rejects(
-      fs.readFile(
-        path.join(
-          ctx.tempRoot,
-          'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/100/config.json'
-        ),
-        'utf8'
-      ),
-      { code: 'ENOENT' }
+    const legacyPath = path.join(
+      ctx.tempRoot,
+      'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/100/config.json'
     );
+    assert.equal(await fs.readFile(legacyPath, 'utf8'), '{"k":1}');
   } finally {
     await ctx.cleanup();
   }
@@ -288,8 +286,6 @@ test('upload with cos driver syncs files to cos mock path', async () => {
     assert.equal(uploadRes.statusCode, 200);
     assert.equal(uploadRes.json().Code, 0);
 
-    const uploadedPrimary = await fs.readFile(path.join(os.tmpdir(), 'pulzz-cos-mock/pulzz-gameres/wxmini/101/config.json'), 'utf8');
-    assert.equal(uploadedPrimary, '{"k":2}');
     const uploadedLegacy = await fs.readFile(
       path.join(
         os.tmpdir(),
@@ -330,8 +326,14 @@ test('upload zip generated from directory does not create nested version folder'
     assert.equal(uploadRes.statusCode, 200);
     assert.equal(uploadRes.json().Code, 0);
 
-    const expected = path.join(ctx.tempRoot, 'cdn/pulzz-gameres/wxmini/100/config.json');
-    const unexpected = path.join(ctx.tempRoot, 'cdn/pulzz-gameres/wxmini/100/100/config.json');
+    const expected = path.join(
+      ctx.tempRoot,
+      'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/100/config.json'
+    );
+    const unexpected = path.join(
+      ctx.tempRoot,
+      'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/100/100/config.json'
+    );
     assert.equal(await fs.readFile(expected, 'utf8'), '{"k":3}');
     assert.equal(fsSync.existsSync(unexpected), false);
   } finally {

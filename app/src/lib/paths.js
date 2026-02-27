@@ -32,7 +32,7 @@ function getStateFilePath() {
 }
 
 function getUploadRoot(platformKey = 'wxmini') {
-  return path.join(CDN_ROOT, getAssetsPrefixRoot(), platformKey);
+  return getPublishBasePath();
 }
 
 function getPublishBasePath() {
