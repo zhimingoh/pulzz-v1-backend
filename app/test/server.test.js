@@ -148,6 +148,54 @@ test('upload invalid filename returns 4001', async () => {
   }
 });
 
+test('register version succeeds when version exists in storage', async () => {
+  const ctx = await setupApp();
+  try {
+    const existingVersionDir = path.join(ctx.tempRoot, 'cdn', 'pulzz-gameres', 'wxmini', '112');
+    await fs.mkdir(existingVersionDir, { recursive: true });
+    await fs.writeFile(path.join(existingVersionDir, 'manifest.json'), '{}');
+
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/admin/register',
+      headers: {
+        'content-type': 'application/json',
+        authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user')
+      },
+      payload: { platform: 'wxmini', version: '112' }
+    });
+
+    assert.equal(res.statusCode, 200);
+    const body = res.json();
+    assert.equal(body.Code, 0);
+    assert.equal(body.Message, 'registered');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('register version fails when version is not in storage', async () => {
+  const ctx = await setupApp();
+  try {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/admin/register',
+      headers: {
+        'content-type': 'application/json',
+        authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user')
+      },
+      payload: { platform: 'wxmini', version: '999' }
+    });
+
+    assert.equal(res.statusCode, 400);
+    const body = res.json();
+    assert.equal(body.Code, 4004);
+    assert.equal(body.Message, 'version_not_found');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('admin routes require basic auth', async () => {
   const ctx = await setupApp();
   try {

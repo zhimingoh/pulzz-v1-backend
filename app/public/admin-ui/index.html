@@ -94,11 +94,12 @@
       </div>
 
       <div class="card">
-        <h2>Upload Version ZIP</h2>
-        <form id="uploadForm" class="row">
-          <input type="file" id="zipFile" name="file" accept=".zip" required />
-          <button type="submit">Upload</button>
+        <h2>Register Uploaded Version</h2>
+        <form id="registerForm" class="row">
+          <input type="text" id="registerVersion" placeholder="e.g. 112" pattern="[0-9]+" required />
+          <button type="submit">Register</button>
         </form>
+        <p style="margin-bottom: 0; color: var(--muted)">Upload files to COS first, then register the version here.</p>
       </div>
 
       <div class="card">
@@ -164,20 +165,15 @@
         });
       }
 
-      document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+      document.getElementById('registerForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const file = document.getElementById('zipFile').files[0];
-        if (!file) {
+        const version = (document.getElementById('registerVersion').value || '').trim();
+        if (!/^\d+$/.test(version)) {
+          setStatus('invalid version');
           return;
         }
-
-        const form = new FormData();
-        form.append('platform', PLATFORM);
-        form.append('file', file, file.name);
-
-        setStatus('Uploading...');
-        const res = await fetch('/admin/upload', { method: 'POST', body: form });
-        const body = await res.json();
+        setStatus(`Registering ${version}...`);
+        const body = await postJson('/admin/register', { platform: PLATFORM, version });
         setStatus(`${body.Code}: ${body.Message}`);
         await refreshVersions();
       });

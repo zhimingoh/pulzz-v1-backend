@@ -375,6 +375,28 @@ async function createServer() {
     }
   });
 
+  app.post('/admin/register', async (request, reply) => {
+    const { platform, version } = request.body || {};
+    if (platform !== ADMIN_PLATFORM) {
+      return reply.code(400).send(failure(ERROR_CODES.INVALID_PLATFORM, 'invalid_platform', {}));
+    }
+    if (!/^\d+$/.test(String(version || ''))) {
+      return reply.code(400).send(failure(ERROR_CODES.INVALID_REQUEST, 'invalid_version', {}));
+    }
+
+    try {
+      const discovered = await listAvailableVersions(platform);
+      if (!discovered.includes(version)) {
+        return reply.code(400).send(failure(ERROR_CODES.VERSION_NOT_FOUND, 'version_not_found', {}));
+      }
+      const overwrite = await recordUpload(version);
+      return success({ version, platform }, overwrite ? 'registered_overwrite' : 'registered');
+    } catch (error) {
+      request.log.error(error);
+      return reply.code(500).send(failure(ERROR_CODES.INTERNAL, 'internal_error', {}));
+    }
+  });
+
   app.get('/admin/versions', async (request, reply) => {
     const { platform } = request.query;
     if (platform !== ADMIN_PLATFORM) {
