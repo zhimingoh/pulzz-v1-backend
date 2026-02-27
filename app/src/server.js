@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const Fastify = require('fastify');
 const multipart = require('@fastify/multipart');
 const fastifyStatic = require('@fastify/static');
@@ -10,7 +11,6 @@ const { withFileLock } = require('./lib/lock');
 const {
   CONSTANTS,
   getUploadRoot,
-  getPublishTarget,
   getStateFilePath
 } = require('./lib/paths');
 const {
@@ -19,6 +19,7 @@ const {
   recordUpload,
   setCurrentVersion
 } = require('./lib/state');
+const { syncUploadedVersion } = require('./lib/storage');
 
 const ADMIN_PLATFORM = 'wxmini';
 const ERROR_CODES = {
@@ -30,6 +31,40 @@ const ERROR_CODES = {
   LOCK_BUSY: 4006,
   INTERNAL: 5000
 };
+const FIXED_ADMIN_PASSWORD = 'shaar008';
+
+function parseBasicAuth(authorization) {
+  if (!authorization || typeof authorization !== 'string') {
+    return null;
+  }
+  const [scheme, encoded] = authorization.split(' ');
+  if (!scheme || !encoded || scheme.toLowerCase() !== 'basic') {
+    return null;
+  }
+  let decoded = '';
+  try {
+    decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  } catch (error) {
+    return null;
+  }
+  const separator = decoded.indexOf(':');
+  if (separator < 0) {
+    return null;
+  }
+  return {
+    username: decoded.slice(0, separator),
+    password: decoded.slice(separator + 1)
+  };
+}
+
+function safeEqualText(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  if (left.length !== right.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(left, right);
+}
 
 function normalizeZipEntryName(name) {
   return name.replaceAll('\\', '/').replace(/^\/+/, '');
@@ -49,8 +84,15 @@ function parseVersionFromFilename(filename) {
 function inspectArchiveLayout(zip, version) {
   const entries = zip
     .getEntries()
-    .map((entry) => normalizeZipEntryName(entry.entryName))
-    .filter((entry) => entry && !entry.startsWith('__MACOSX/') && entry !== '__MACOSX');
+    .map((entry) => {
+      const normalized = normalizeZipEntryName(entry.entryName);
+      return {
+        name: normalized,
+        // Directory markers like "100/" should not be treated as root files.
+        isDirectory: entry.isDirectory || normalized.endsWith('/')
+      };
+    })
+    .filter((entry) => entry.name && !entry.name.startsWith('__MACOSX/') && entry.name !== '__MACOSX');
 
   if (entries.length === 0) {
     return { ok: false, flatten: false };
@@ -60,7 +102,13 @@ function inspectArchiveLayout(zip, version) {
   let hasRootFile = false;
 
   for (const entry of entries) {
-    const parts = entry.split('/').filter(Boolean);
+    const parts = entry.name.split('/').filter(Boolean);
+    if (entry.isDirectory) {
+      if (parts.length >= 1) {
+        topFolders.add(parts[0]);
+      }
+      continue;
+    }
     if (parts.length === 1) {
       hasRootFile = true;
       continue;
@@ -107,26 +155,20 @@ async function extractZipToVersion(filePath, version, uploadRoot) {
   }
 }
 
-async function syncVersion(version) {
-  const sourceDir = path.join(getUploadRoot(ADMIN_PLATFORM), version);
-  const targetDir = getPublishTarget(version);
-
-  await fs.access(sourceDir);
-  await fs.rm(targetDir, { recursive: true, force: true });
-  await fs.mkdir(path.dirname(targetDir), { recursive: true });
-  await fs.cp(sourceDir, targetDir, { recursive: true, force: true });
-}
-
 async function applyVersion(version, action) {
   const lockPath = `${getStateFilePath()}.publish.lock`;
 
   return withFileLock(lockPath, async () => {
     const state = await readState();
+    if (!state.versions.some((v) => v.version === version)) {
+      const err = new Error('version_not_found');
+      err.code = 'VERSION_NOT_FOUND';
+      throw err;
+    }
     if (state.currentVersion === version) {
       return { alreadyCurrent: true };
     }
 
-    await syncVersion(version);
     await setCurrentVersion(version, action);
     return { alreadyCurrent: false };
   }).catch((error) => {
@@ -141,6 +183,9 @@ async function applyVersion(version, action) {
 
 async function createServer() {
   const app = Fastify({ logger: true });
+  const adminPassword = FIXED_ADMIN_PASSWORD;
+  const adminUsername = String(process.env.ADMIN_USERNAME || '');
+  const adminAuthEnabled = true;
 
   await ensureStateFile();
 
@@ -148,6 +193,30 @@ async function createServer() {
   await app.register(fastifyStatic, {
     root: path.join(__dirname, '..', 'public', 'admin-ui'),
     prefix: '/admin-ui/'
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    if (!adminAuthEnabled) {
+      return;
+    }
+    const pathName = request.raw.url || '';
+    const isAdminRoute = pathName.startsWith('/admin/') || pathName.startsWith('/admin-ui');
+    if (!isAdminRoute) {
+      return;
+    }
+
+    const credential = parseBasicAuth(request.headers.authorization);
+    const passwordOk = credential && safeEqualText(credential.password, adminPassword);
+    const usernameOk = !adminUsername || (credential && safeEqualText(credential.username, adminUsername));
+    if (passwordOk && usernameOk) {
+      return;
+    }
+
+    reply.header('WWW-Authenticate', 'Basic realm="Pulzz Admin", charset="UTF-8"');
+    if (pathName.startsWith('/admin/')) {
+      return reply.code(401).send(failure(401, 'unauthorized', {}));
+    }
+    return reply.code(401).type('text/plain').send('Unauthorized');
   });
 
   app.get('/admin-ui', async (request, reply) => {
@@ -223,12 +292,20 @@ async function createServer() {
       await fs.mkdir(getUploadRoot(ADMIN_PLATFORM), { recursive: true });
       await fs.writeFile(tempFile, fileBuffer);
       await extractZipToVersion(tempFile, version, getUploadRoot(ADMIN_PLATFORM));
+      await syncUploadedVersion({
+        platform,
+        version,
+        sourceDir: path.join(getUploadRoot(ADMIN_PLATFORM), version)
+      });
       const overwrite = await recordUpload(version);
       return success({ version, platform }, overwrite ? 'uploaded_overwrite' : 'uploaded');
     } catch (error) {
       request.log.error(error);
       if (error.code === 'ZIP_STRUCTURE_MISMATCH') {
         return reply.code(400).send(failure(ERROR_CODES.ZIP_STRUCTURE_MISMATCH, 'zip_structure_mismatch', {}));
+      }
+      if (error.code === 'COS_CONFIG_MISSING') {
+        return reply.code(500).send(failure(ERROR_CODES.INTERNAL, 'cos_config_missing', {}));
       }
       return reply.code(500).send(failure(ERROR_CODES.INTERNAL, 'internal_error', {}));
     } finally {
@@ -279,7 +356,7 @@ async function createServer() {
       if (error.code === 'LOCK_BUSY') {
         return reply.code(409).send(failure(ERROR_CODES.LOCK_BUSY, 'lock_busy', {}));
       }
-      if (error.code === 'ENOENT') {
+      if (error.code === 'VERSION_NOT_FOUND') {
         return reply.code(400).send(failure(ERROR_CODES.VERSION_NOT_FOUND, 'version_not_found', {}));
       }
       return reply.code(500).send(failure(ERROR_CODES.INTERNAL, 'internal_error', {}));

@@ -101,12 +101,19 @@ pm2 save
 pm2 startup
 ```
 
+### Admin Auth (Basic Auth)
+- Admin authentication is always enabled for:
+  - `/admin-ui/*`
+  - `/admin/*`
+- Fixed password: `shaar008`
+- Optional: set `ADMIN_USERNAME` to require a fixed username.
+
 ### 4) Reverse proxy (recommended)
 Use Nginx/Caddy to expose service externally and keep app bound to localhost.
 
 ## Runtime Paths (default)
 - State file: `/opt/pulzz-hotupdate/app/config/state.json`
-- Upload path: `/opt/pulzz-hotupdate/cdn/gameres/wxmini/{version}`
+- Upload path: `/opt/pulzz-hotupdate/cdn/pulzz-gameres/wxmini/{version}`
 - Publish target: `/opt/pulzz-hotupdate/cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/{version}`
 
 ## Deploy Script

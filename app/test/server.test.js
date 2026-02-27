@@ -1,9 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { execFileSync } = require('node:child_process');
 const AdmZip = require('adm-zip');
+const FIXED_ADMIN_PASSWORD = 'shaar008';
+
+function adminAuthHeader(password, username = 'admin') {
+  const token = Buffer.from(`${username}:${password}`, 'utf8').toString('base64');
+  return `Basic ${token}`;
+}
 
 function buildMultipart(fields, file) {
   const boundary = `----pulzz-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -31,7 +39,7 @@ function buildMultipart(fields, file) {
   };
 }
 
-async function setupApp() {
+async function setupApp(options = {}) {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pulzz-test-'));
   const appRoot = path.join(tempRoot, 'app');
 
@@ -39,11 +47,16 @@ async function setupApp() {
   process.env.PULZZ_APP_ROOT = appRoot;
   process.env.PULZZ_CDN_ROOT = path.join(tempRoot, 'cdn');
   process.env.PULZZ_STATE_PATH = path.join(appRoot, 'config', 'state.json');
+  process.env.STORAGE_DRIVER = options.storageDriver || 'local';
+  process.env.PULZZ_COS_MOCK_ROOT = options.cosMockRoot || '';
+  process.env.ADMIN_PASSWORD = options.adminPassword || '';
+  process.env.ADMIN_USERNAME = options.adminUsername || '';
 
   delete require.cache[require.resolve('../src/lib/paths')];
   delete require.cache[require.resolve('../src/lib/state')];
   delete require.cache[require.resolve('../src/lib/lock')];
   delete require.cache[require.resolve('../src/lib/response')];
+  delete require.cache[require.resolve('../src/lib/storage')];
   delete require.cache[require.resolve('../src/server')];
   const { createServer } = require('../src/server');
   const app = await createServer();
@@ -81,7 +94,10 @@ test('upload invalid filename returns 4001', async () => {
     const res = await ctx.app.inject({
       method: 'POST',
       url: '/admin/upload',
-      headers: { 'content-type': mp.contentType },
+      headers: {
+        'content-type': mp.contentType,
+        authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user')
+      },
       payload: mp.body
     });
 
@@ -93,7 +109,28 @@ test('upload invalid filename returns 4001', async () => {
   }
 });
 
-test('upload then publish updates current version and syncs files', async () => {
+test('admin routes require basic auth', async () => {
+  const ctx = await setupApp();
+  try {
+    const unauth = await ctx.app.inject({
+      method: 'GET',
+      url: '/admin/versions?platform=wxmini'
+    });
+    assert.equal(unauth.statusCode, 401);
+
+    const auth = await ctx.app.inject({
+      method: 'GET',
+      url: '/admin/versions?platform=wxmini',
+      headers: { authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD) }
+    });
+    assert.equal(auth.statusCode, 200);
+    assert.equal(auth.json().Code, 0);
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('upload then publish only updates current version without local sync copy', async () => {
   const ctx = await setupApp();
   try {
     const zip = new AdmZip();
@@ -103,7 +140,10 @@ test('upload then publish updates current version and syncs files', async () => 
     const uploadRes = await ctx.app.inject({
       method: 'POST',
       url: '/admin/upload',
-      headers: { 'content-type': mp.contentType },
+      headers: {
+        'content-type': mp.contentType,
+        authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user')
+      },
       payload: mp.body
     });
 
@@ -113,6 +153,7 @@ test('upload then publish updates current version and syncs files', async () => 
     const publishRes = await ctx.app.inject({
       method: 'POST',
       url: '/admin/publish',
+      headers: { authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user') },
       payload: { platform: 'wxmini', version: '100' }
     });
 
@@ -122,15 +163,92 @@ test('upload then publish updates current version and syncs files', async () => 
     const state = JSON.parse(await fs.readFile(path.join(ctx.tempRoot, 'app', 'config', 'state.json'), 'utf8'));
     assert.equal(state.currentVersion, '100');
 
-    const synced = await fs.readFile(
+    await assert.rejects(
+      fs.readFile(
+        path.join(
+          ctx.tempRoot,
+          'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/100/config.json'
+        ),
+        'utf8'
+      ),
+      { code: 'ENOENT' }
+    );
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('upload with cos driver syncs files to cos mock path', async () => {
+  const ctx = await setupApp({
+    storageDriver: 'cos',
+    cosMockRoot: path.join(os.tmpdir(), 'pulzz-cos-mock')
+  });
+  try {
+    const zip = new AdmZip();
+    zip.addFile('101/config.json', Buffer.from('{"k":2}'));
+    const mp = buildMultipart({ platform: 'wxmini' }, { filename: '101.zip', content: zip.toBuffer() });
+
+    const uploadRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/admin/upload',
+      headers: {
+        'content-type': mp.contentType,
+        authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user')
+      },
+      payload: mp.body
+    });
+
+    assert.equal(uploadRes.statusCode, 200);
+    assert.equal(uploadRes.json().Code, 0);
+
+    const uploadedPrimary = await fs.readFile(path.join(os.tmpdir(), 'pulzz-cos-mock/pulzz-gameres/wxmini/101/config.json'), 'utf8');
+    assert.equal(uploadedPrimary, '{"k":2}');
+    const uploadedLegacy = await fs.readFile(
       path.join(
-        ctx.tempRoot,
-        'cdn/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/100/config.json'
+        os.tmpdir(),
+        'pulzz-cos-mock/hotupdate/com.smartdog.bbqgame/WebGLWxMiniGame/1.0.0/WxMiniGame/DefaultPackage/101/config.json'
       ),
       'utf8'
     );
-    assert.equal(synced, '{"k":1}');
+    assert.equal(uploadedLegacy, '{"k":2}');
   } finally {
+    await fs.rm(path.join(os.tmpdir(), 'pulzz-cos-mock'), { recursive: true, force: true });
+    await ctx.cleanup();
+  }
+});
+
+test('upload zip generated from directory does not create nested version folder', async () => {
+  const ctx = await setupApp();
+  const zipTempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pulzz-zip-'));
+  try {
+    const contentDir = path.join(zipTempRoot, '100');
+    await fs.mkdir(contentDir, { recursive: true });
+    await fs.writeFile(path.join(contentDir, 'config.json'), '{"k":3}');
+
+    // Reproduce real operator flow: `zip -r 100.zip 100`
+    execFileSync('zip', ['-rq', '100.zip', '100'], { cwd: zipTempRoot });
+    const zipBuffer = await fs.readFile(path.join(zipTempRoot, '100.zip'));
+    const mp = buildMultipart({ platform: 'wxmini' }, { filename: '100.zip', content: zipBuffer });
+
+    const uploadRes = await ctx.app.inject({
+      method: 'POST',
+      url: '/admin/upload',
+      headers: {
+        'content-type': mp.contentType,
+        authorization: adminAuthHeader(FIXED_ADMIN_PASSWORD, 'any-user')
+      },
+      payload: mp.body
+    });
+
+    assert.equal(uploadRes.statusCode, 200);
+    assert.equal(uploadRes.json().Code, 0);
+
+    const expected = path.join(ctx.tempRoot, 'cdn/pulzz-gameres/wxmini/100/config.json');
+    const unexpected = path.join(ctx.tempRoot, 'cdn/pulzz-gameres/wxmini/100/100/config.json');
+    assert.equal(await fs.readFile(expected, 'utf8'), '{"k":3}');
+    assert.equal(fsSync.existsSync(unexpected), false);
+  } finally {
+    await fs.rm(zipTempRoot, { recursive: true, force: true });
     await ctx.cleanup();
   }
 });

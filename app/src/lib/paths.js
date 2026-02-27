@@ -12,12 +12,27 @@ const CONSTANTS = {
   appVersion: '1.0.0'
 };
 
+function getAssetsPrefixRoot() {
+  return (process.env.COS_PREFIX_ROOT || 'pulzz-gameres').toLowerCase();
+}
+
+function getLegacyHotupdatePrefixRoot() {
+  return path.posix.join(
+    'hotupdate',
+    CONSTANTS.packageName,
+    CONSTANTS.platform,
+    CONSTANTS.appVersion,
+    CONSTANTS.channel,
+    CONSTANTS.assetPackageName
+  );
+}
+
 function getStateFilePath() {
   return process.env.PULZZ_STATE_PATH || path.join(APP_ROOT, 'config', 'state.json');
 }
 
 function getUploadRoot(platformKey = 'wxmini') {
-  return path.join(CDN_ROOT, 'gameres', platformKey);
+  return path.join(CDN_ROOT, getAssetsPrefixRoot(), platformKey);
 }
 
 function getPublishBasePath() {
@@ -40,6 +55,8 @@ module.exports = {
   ROOT,
   APP_ROOT,
   CDN_ROOT,
+  getAssetsPrefixRoot,
+  getLegacyHotupdatePrefixRoot,
   CONSTANTS,
   getStateFilePath,
   getUploadRoot,
