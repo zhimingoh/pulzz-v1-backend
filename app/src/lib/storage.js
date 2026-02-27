@@ -2,8 +2,52 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { getAssetsPrefixRoot, getLegacyHotupdatePrefixRoot } = require('./paths');
 
+const COS_IO_TIMEOUT_MS = Number(process.env.COS_IO_TIMEOUT_MS || 120000);
+const COS_RETRY_COUNT = Number(process.env.COS_RETRY_COUNT || 3);
+
 function normalizeRelPath(relPath) {
   return relPath.split(path.sep).join('/');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableCosError(error) {
+  if (!error) {
+    return false;
+  }
+  const code = String(error.code || '');
+  const message = String(error.message || '').toLowerCase();
+  const statusCode = Number(error.statusCode || 0);
+  if (statusCode >= 500) {
+    return true;
+  }
+  if (['ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'ESOCKETTIMEDOUT'].includes(code)) {
+    return true;
+  }
+  if (['RequestTimeout', 'InternalError', 'ServiceUnavailable', 'SlowDown', 'NetworkingError'].includes(code)) {
+    return true;
+  }
+  return message.includes('timeout') || message.includes('timed out') || message.includes('socket hang up');
+}
+
+async function withRetry(task, options = {}) {
+  const retries = Number(options.retries ?? COS_RETRY_COUNT);
+  const baseDelay = Number(options.baseDelayMs ?? 250);
+  let lastError = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (i >= retries || !isRetryableCosError(error)) {
+        throw error;
+      }
+      await sleep(baseDelay * (i + 1));
+    }
+  }
+  throw lastError;
 }
 
 async function listFiles(rootDir) {
@@ -37,23 +81,100 @@ async function syncToCosMock({ platform, version, sourceDir }) {
   }
 }
 
-async function syncToCosReal({ platform, version, sourceDir }) {
+async function listVersionsByFsRoot(rootDir) {
+  try {
+    const entries = await fs.readdir(rootDir, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((a, b) => Number(b) - Number(a));
+  } catch {
+    return [];
+  }
+}
+
+function createCosClient() {
   const secretId = process.env.TENCENT_SECRET_ID || '';
   const secretKey = process.env.TENCENT_SECRET_KEY || '';
   const bucket = process.env.TENCENT_COS_BUCKET || '';
   const region = process.env.TENCENT_COS_REGION || '';
-  const prefixRoot = getAssetsPrefixRoot();
-  const legacyPrefixRoot = getLegacyHotupdatePrefixRoot();
-
   if (!secretId || !secretKey || !bucket || !region) {
     const err = new Error('cos_config_missing');
     err.code = 'COS_CONFIG_MISSING';
     throw err;
   }
-
   // Lazy require so local mode does not need this dependency loaded.
   const COS = require('cos-nodejs-sdk-v5');
   const cos = new COS({ SecretId: secretId, SecretKey: secretKey });
+  return { cos, bucket, region };
+}
+
+async function listVersionsFromCos(platform) {
+  const { cos, bucket, region } = createCosClient();
+  const primaryPrefix = `${getAssetsPrefixRoot()}/${platform}/`;
+  const legacyPrefix = `${getLegacyHotupdatePrefixRoot()}/`;
+  const discovered = new Set();
+
+  async function scan(prefix) {
+    let marker = '';
+    while (true) {
+      const page = await withRetry(
+        () =>
+          new Promise((resolve, reject) => {
+            cos.getBucket(
+              {
+                Bucket: bucket,
+                Region: region,
+                Prefix: prefix,
+                Marker: marker,
+                MaxKeys: 1000
+              },
+              (error, data) => (error ? reject(error) : resolve(data))
+            );
+          })
+      );
+      const keys = ((page && page.Contents) || []).map((item) => item.Key).filter(Boolean);
+      for (const key of keys) {
+        const rest = key.slice(prefix.length);
+        const version = rest.split('/')[0];
+        if (/^\d+$/.test(version)) {
+          discovered.add(version);
+        }
+      }
+      const isTruncated = String(page && page.IsTruncated) === 'true';
+      if (!isTruncated || !keys.length) {
+        break;
+      }
+      marker = keys[keys.length - 1];
+    }
+  }
+
+  await scan(primaryPrefix);
+  await scan(legacyPrefix);
+  return [...discovered].sort((a, b) => Number(b) - Number(a));
+}
+
+async function listAvailableVersions(platform) {
+  const driver = (process.env.STORAGE_DRIVER || 'local').toLowerCase();
+  if (driver === 'cos') {
+    if (process.env.PULZZ_COS_MOCK_ROOT) {
+      const mockRoot = process.env.PULZZ_COS_MOCK_ROOT;
+      const primary = await listVersionsByFsRoot(path.join(mockRoot, getAssetsPrefixRoot(), platform));
+      const legacy = await listVersionsByFsRoot(path.join(mockRoot, getLegacyHotupdatePrefixRoot()));
+      return [...new Set([...primary, ...legacy])].sort((a, b) => Number(b) - Number(a));
+    }
+    return listVersionsFromCos(platform);
+  }
+  const localRoot = process.env.PULZZ_CDN_ROOT
+    ? path.join(process.env.PULZZ_CDN_ROOT, getAssetsPrefixRoot(), platform)
+    : path.join('/opt/pulzz-hotupdate', 'cdn', getAssetsPrefixRoot(), platform);
+  return listVersionsByFsRoot(localRoot);
+}
+
+async function syncToCosReal({ platform, version, sourceDir }) {
+  const { cos, bucket, region } = createCosClient();
+  const prefixRoot = getAssetsPrefixRoot();
+  const legacyPrefixRoot = getLegacyHotupdatePrefixRoot();
   const versionPrefixes = [
     `${prefixRoot}/${platform}/${version}/`,
     `${legacyPrefixRoot}/${version}/`
@@ -63,18 +184,21 @@ async function syncToCosReal({ platform, version, sourceDir }) {
     const all = [];
     let marker = '';
     while (true) {
-      const page = await new Promise((resolve, reject) => {
-        cos.getBucket(
-          {
-            Bucket: bucket,
-            Region: region,
-            Prefix: prefix,
-            Marker: marker,
-            MaxKeys: 1000
-          },
-          (error, data) => (error ? reject(error) : resolve(data))
-        );
-      });
+      const page = await withRetry(
+        () =>
+          new Promise((resolve, reject) => {
+            cos.getBucket(
+              {
+                Bucket: bucket,
+                Region: region,
+                Prefix: prefix,
+                Marker: marker,
+                MaxKeys: 1000
+              },
+              (error, data) => (error ? reject(error) : resolve(data))
+            );
+          })
+      );
       const keys = ((page && page.Contents) || []).map((item) => item.Key).filter(Boolean);
       all.push(...keys);
       const isTruncated = String(page && page.IsTruncated) === 'true';
@@ -95,17 +219,20 @@ async function syncToCosReal({ platform, version, sourceDir }) {
       chunks.push(keys.slice(i, i + 1000));
     }
     for (const chunk of chunks) {
-      await new Promise((resolve, reject) => {
-        cos.deleteMultipleObject(
-          {
-            Bucket: bucket,
-            Region: region,
-            Objects: chunk.map((key) => ({ Key: key })),
-            Quiet: true
-          },
-          (error) => (error ? reject(error) : resolve())
-        );
-      });
+      await withRetry(
+        () =>
+          new Promise((resolve, reject) => {
+            cos.deleteMultipleObject(
+              {
+                Bucket: bucket,
+                Region: region,
+                Objects: chunk.map((key) => ({ Key: key })),
+                Quiet: true
+              },
+              (error) => (error ? reject(error) : resolve())
+            );
+          })
+      );
     }
   }
 
@@ -122,23 +249,27 @@ async function syncToCosReal({ platform, version, sourceDir }) {
       const rel = normalizeRelPath(path.relative(sourceDir, file));
       const key = `${versionPrefix}${rel}`;
       const body = await fs.readFile(file);
-      await new Promise((resolve, reject) => {
-        cos.putObject(
-          {
-            Bucket: bucket,
-            Region: region,
-            Key: key,
-            Body: body
-          },
-          (error) => {
-            if (error) {
-              reject(error);
-              return;
-            }
-            resolve();
-          }
-        );
-      });
+      await withRetry(
+        () =>
+          new Promise((resolve, reject) => {
+            cos.putObject(
+              {
+                Bucket: bucket,
+                Region: region,
+                Key: key,
+                Body: body,
+                Timeout: COS_IO_TIMEOUT_MS
+              },
+              (error) => {
+                if (error) {
+                  reject(error);
+                  return;
+                }
+                resolve();
+              }
+            );
+          })
+      );
     }
   }
 }
@@ -158,5 +289,6 @@ async function syncUploadedVersion({ platform, version, sourceDir }) {
 }
 
 module.exports = {
-  syncUploadedVersion
+  syncUploadedVersion,
+  listAvailableVersions
 };

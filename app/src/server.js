@@ -19,7 +19,7 @@ const {
   recordUpload,
   setCurrentVersion
 } = require('./lib/state');
-const { syncUploadedVersion } = require('./lib/storage');
+const { syncUploadedVersion, listAvailableVersions } = require('./lib/storage');
 
 const ADMIN_PLATFORM = 'wxmini';
 const ERROR_CODES = {
@@ -29,6 +29,7 @@ const ERROR_CODES = {
   VERSION_NOT_FOUND: 4004,
   INVALID_REQUEST: 4005,
   LOCK_BUSY: 4006,
+  FILE_TOO_LARGE: 4007,
   INTERNAL: 5000
 };
 const FIXED_ADMIN_PASSWORD = 'shaar008';
@@ -159,12 +160,13 @@ async function applyVersion(version, action) {
   const lockPath = `${getStateFilePath()}.publish.lock`;
 
   return withFileLock(lockPath, async () => {
-    const state = await readState();
-    if (!state.versions.some((v) => v.version === version)) {
+    const available = await listAvailableVersions(ADMIN_PLATFORM);
+    if (!available.includes(version)) {
       const err = new Error('version_not_found');
       err.code = 'VERSION_NOT_FOUND';
       throw err;
     }
+    const state = await readState();
     if (state.currentVersion === version) {
       return { alreadyCurrent: true };
     }
@@ -186,10 +188,15 @@ async function createServer() {
   const adminPassword = FIXED_ADMIN_PASSWORD;
   const adminUsername = String(process.env.ADMIN_USERNAME || '');
   const adminAuthEnabled = true;
+  const uploadLimitMb = Number(process.env.UPLOAD_MAX_MB || 512);
 
   await ensureStateFile();
 
-  await app.register(multipart);
+  await app.register(multipart, {
+    limits: {
+      fileSize: Math.max(1, uploadLimitMb) * 1024 * 1024
+    }
+  });
   await app.register(fastifyStatic, {
     root: path.join(__dirname, '..', 'public', 'admin-ui'),
     prefix: '/admin-ui/'
@@ -301,11 +308,17 @@ async function createServer() {
       return success({ version, platform }, overwrite ? 'uploaded_overwrite' : 'uploaded');
     } catch (error) {
       request.log.error(error);
+      if (error.code === 'FST_REQ_FILE_TOO_LARGE' || error.statusCode === 413) {
+        return reply.code(413).send(failure(ERROR_CODES.FILE_TOO_LARGE, 'file_too_large', {}));
+      }
       if (error.code === 'ZIP_STRUCTURE_MISMATCH') {
         return reply.code(400).send(failure(ERROR_CODES.ZIP_STRUCTURE_MISMATCH, 'zip_structure_mismatch', {}));
       }
       if (error.code === 'COS_CONFIG_MISSING') {
         return reply.code(500).send(failure(ERROR_CODES.INTERNAL, 'cos_config_missing', {}));
+      }
+      if (error.message) {
+        return reply.code(500).send(failure(ERROR_CODES.INTERNAL, `internal_error:${error.message}`, {}));
       }
       return reply.code(500).send(failure(ERROR_CODES.INTERNAL, 'internal_error', {}));
     } finally {
@@ -320,7 +333,16 @@ async function createServer() {
     }
 
     const state = await readState();
-    const versions = [...state.versions].sort((a, b) => Number(b.version) - Number(a.version));
+    const discovered = await listAvailableVersions(platform);
+    const stateMap = new Map((state.versions || []).map((v) => [v.version, v]));
+    const versions = discovered.map((version) => {
+      const item = stateMap.get(version) || {};
+      return {
+        version,
+        uploadedAt: item.uploadedAt || '',
+        publishedAt: item.publishedAt || ''
+      };
+    });
     return success({
       platform,
       currentVersion: state.currentVersion,
@@ -341,8 +363,8 @@ async function createServer() {
     }
 
     try {
-      const state = await readState();
-      if (!state.versions.some((v) => v.version === version)) {
+      const discovered = await listAvailableVersions(platform);
+      if (!discovered.includes(version)) {
         return reply.code(400).send(failure(ERROR_CODES.VERSION_NOT_FOUND, 'version_not_found', {}));
       }
 
