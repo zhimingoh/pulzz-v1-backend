@@ -34,6 +34,49 @@ const ERROR_CODES = {
 };
 const FIXED_ADMIN_PASSWORD = 'shaar008';
 
+function splitHeaderFirst(value) {
+  return String(value || '').split(',')[0].trim();
+}
+
+function ensureNoTrailingSlash(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+function joinUrl(base, endpointPath) {
+  const normalizedBase = ensureNoTrailingSlash(base);
+  const normalizedPath = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
+  return `${normalizedBase}${normalizedPath}`;
+}
+
+function getRequestBaseUrl(request) {
+  const proto = splitHeaderFirst(request.headers['x-forwarded-proto']) || 'https';
+  const host = splitHeaderFirst(request.headers['x-forwarded-host']) || request.headers.host || 'api.kaukei.com';
+  return `${proto}://${host}`;
+}
+
+function getCheckAppVersionUrl(request) {
+  if (process.env.CHECK_APP_VERSION_URL) {
+    return process.env.CHECK_APP_VERSION_URL;
+  }
+  return joinUrl(getRequestBaseUrl(request), '/api/GameAppVersion/GetVersion');
+}
+
+function getCheckResourceVersionUrl(request) {
+  if (process.env.CHECK_RESOURCE_VERSION_URL) {
+    return process.env.CHECK_RESOURCE_VERSION_URL;
+  }
+  return joinUrl(getRequestBaseUrl(request), '/api/GameAssetPackageVersion/GetVersion');
+}
+
+function getResourceRootPath(request) {
+  if (process.env.CDN_ROOT_PATH) {
+    return process.env.CDN_ROOT_PATH;
+  }
+  const reqBase = getRequestBaseUrl(request);
+  const cdnBase = reqBase.replace('://api.', '://cdn.');
+  return joinUrl(cdnBase, '/hotupdate');
+}
+
 function parseBasicAuth(authorization) {
   if (!authorization || typeof authorization !== 'string') {
     return null;
@@ -230,37 +273,43 @@ async function createServer() {
     reply.redirect('/admin-ui/');
   });
 
-  app.post('/api/GameGlobalInfo/GetInfo', async () => {
-    const state = await readState();
+  app.post('/api/GameGlobalInfo/GetInfo', async (request) => {
     return success({
-      PackageName: CONSTANTS.packageName,
-      Platform: CONSTANTS.platform,
-      Channel: CONSTANTS.channel,
-      CurrentVersion: state.currentVersion || '0',
-      AppVersion: CONSTANTS.appVersion
+      CheckAppVersionUrl: getCheckAppVersionUrl(request),
+      CheckResourceVersionUrl: getCheckResourceVersionUrl(request),
+      AOTCodeList: process.env.AOT_CODE_LIST || '[]',
+      Content: process.env.GLOBAL_INFO_CONTENT || '{}'
     });
   });
 
   app.post('/api/GameAppVersion/GetVersion', async () => {
-    const state = await readState();
     return success({
+      IsForce: false,
+      AppDownloadUrl: '',
+      IsUpgrade: false,
+      UpdateAnnouncement: '',
+      UpdateTitle: '',
       PackageName: CONSTANTS.packageName,
       Platform: CONSTANTS.platform,
       Channel: CONSTANTS.channel,
       AppVersion: CONSTANTS.appVersion,
-      CurrentVersion: state.currentVersion || '0'
+      CurrentVersion: '0'
     });
   });
 
-  app.post('/api/GameAssetPackageVersion/GetVersion', async () => {
+  app.post('/api/GameAssetPackageVersion/GetVersion', async (request) => {
     const state = await readState();
+    const currentVersion = state.currentVersion || '0';
     return success({
+      Language: '',
+      Version: currentVersion,
       PackageName: CONSTANTS.packageName,
       Platform: CONSTANTS.platform,
       Channel: CONSTANTS.channel,
       AssetPackageName: CONSTANTS.assetPackageName,
+      RootPath: getResourceRootPath(request),
       AppVersion: CONSTANTS.appVersion,
-      CurrentVersion: state.currentVersion || '0'
+      CurrentVersion: currentVersion
     });
   });
 

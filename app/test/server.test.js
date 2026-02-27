@@ -85,6 +85,45 @@ test('client api returns fixed app version', async () => {
   }
 });
 
+test('global info api returns check urls for startup flow', async () => {
+  const ctx = await setupApp();
+  try {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/GameGlobalInfo/GetInfo',
+      headers: { host: 'api.kaukei.com' }
+    });
+    assert.equal(res.statusCode, 200);
+    const json = res.json();
+    assert.equal(json.Code, 0);
+    const data = JSON.parse(json.Data);
+    assert.equal(data.CheckAppVersionUrl, 'https://api.kaukei.com/api/GameAppVersion/GetVersion');
+    assert.equal(data.CheckResourceVersionUrl, 'https://api.kaukei.com/api/GameAssetPackageVersion/GetVersion');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
+test('asset package version api returns version and root path', async () => {
+  const ctx = await setupApp();
+  try {
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/GameAssetPackageVersion/GetVersion',
+      headers: { host: 'api.kaukei.com' }
+    });
+    assert.equal(res.statusCode, 200);
+    const json = res.json();
+    assert.equal(json.Code, 0);
+    const data = JSON.parse(json.Data);
+    assert.equal(data.Version, '0');
+    assert.equal(data.RootPath, 'https://cdn.kaukei.com/hotupdate');
+    assert.equal(data.AssetPackageName, 'DefaultPackage');
+  } finally {
+    await ctx.cleanup();
+  }
+});
+
 test('upload invalid filename returns 4001', async () => {
   const ctx = await setupApp();
   try {
