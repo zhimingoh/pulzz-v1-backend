@@ -28,7 +28,7 @@ function getLegacyHotupdatePrefixRoot() {
 }
 
 function getStateFilePath() {
-  return process.env.PULZZ_STATE_PATH || path.join(APP_ROOT, 'config', 'state.json');
+  return process.env.PULZZ_STATE_PATH || path.join(ROOT, 'data', 'state.json');
 }
 
 function getUploadRoot(platformKey = 'wxmini') {

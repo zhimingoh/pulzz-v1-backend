@@ -8,7 +8,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         HOST: "127.0.0.1",
-        PORT: "20808"
+        PORT: "20808",
+        PULZZ_STATE_PATH: "/opt/pulzz-hotupdate/data/state.json"
       }
     }
   ]
